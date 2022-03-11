@@ -416,8 +416,8 @@ class LLVMDependencyCMake(CMakeDependency):
             return
 
         # Extract extra include directories and definitions
-        inc_dirs, = self.traceparser.get_cmake_var(None, 'PACKAGE_INCLUDE_DIRS', [])
-        defs, = self.traceparser.get_cmake_var(None, 'PACKAGE_DEFINITIONS', [])
+        inc_dirs, _ = self.traceparser.get_cmake_list_var(None, 'PACKAGE_INCLUDE_DIRS', [])
+        defs, _ = self.traceparser.get_cmake_list_var(None, 'PACKAGE_DEFINITIONS', [])
         # LLVM explicitly uses space-separated variables rather than semicolon lists
         if len(defs) == 1:
             defs = defs[0].split(' ')
@@ -439,7 +439,7 @@ class LLVMDependencyCMake(CMakeDependency):
         if self.traceparser is None:
             return res
         for mod, required in modules:
-            cm_targets, = self.traceparser.get_cmake_var(None, f'MESON_LLVM_TARGETS_{mod}')
+            cm_targets, _ = self.traceparser.get_cmake_list_var(None, f'MESON_LLVM_TARGETS_{mod}')
             if not cm_targets:
                 if required:
                     raise self._gen_exception(f'LLVM module {mod} was not found')
@@ -453,9 +453,9 @@ class LLVMDependencyCMake(CMakeDependency):
     def _original_module_name(self, module: str) -> T.Optional[str]:
         if self.traceparser is None:
             return None
-        orig_name, = self.traceparser.get_cmake_var(None, f'MESON_TARGET_TO_LLVM_{module}')
-        if orig_name:
-            return orig_name[0]
+        orig_name, _ = self.traceparser.get_cmake_str_var(None, f'MESON_TARGET_TO_LLVM_{module}')
+        if orig_name is not None:
+            return orig_name
         return module
 
 
