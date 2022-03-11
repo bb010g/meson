@@ -121,6 +121,8 @@ class CMakeTraceParser:
         self.functions = {
             'set': self._cmake_set,
             'unset': self._cmake_unset,
+            'string': self._cmake_string,
+            'list': self._cmake_list,
             'add_executable': self._cmake_add_executable,
             'add_library': self._cmake_add_library,
             'add_custom_command': self._cmake_add_custom_command,
@@ -234,26 +236,56 @@ class CMakeTraceParser:
         for tgt in self.targets.values():
             tgt.strip_properties()
 
-    def get_first_cmake_var_of(self, var_list: T.List[str]) -> T.List[str]:
-        # Return the first found CMake variable in list var_list
-        for i in var_list:
-            if i in self.vars:
-                return self.vars[i]
+    @T.overload
+    def get_cmake_var(self, file: Path, identifier: str, default: T.List[str]) -> T.Tuple[T.List[str], T.List[str]]: ...
+    @T.overload
+    def get_cmake_var(self, file: Path, identifier: str, default: T.Optional[T.List[str]] = None) -> T.Tuple[T.Optional[T.List[str]], T.Optional[T.List[str]]]: ...
+    @T.overload
+    def get_cmake_var(self, file: None, identifier: str, default: T.List[str]) -> T.Tuple[T.List[str]]: ...
+    @T.overload
+    def get_cmake_var(self, file: None, identifier: str, default: T.Optional[T.List[str]] = None) -> T.Tuple[T.Optional[T.List[str]]]: ...
 
-        return []
+    def get_cmake_var(self, file: T.Optional[Path], identifier: str, default: T.Optional[T.List[str]] = None) -> T.Union[T.Tuple[T.Optional[T.List[str]], T.Optional[T.List[str]]], T.Tuple[T.Optional[T.List[str]]]]:
+        var = self.vars.get(identifier, default)
+        if file is not None:
+            return var, self.vars_by_file.setdefault(file, {}).get(identifier, default)
+        else:
+            return var,
 
-    def get_cmake_var(self, var: str) -> T.List[str]:
-        # Return the value of the CMake variable var or an empty list if var does not exist
-        if var in self.vars:
-            return self.vars[var]
+    @T.overload
+    def set_cmake_var(self, file: Path, identifier: str, var: T.Optional[T.List[str]], var_by_file: T.Optional[T.List[str]]) -> None: ...
+    @T.overload
+    def set_cmake_var(self, file: None, identifier: str, var: T.Optional[T.List[str]], var_by_file: None) -> None: ...
 
-        return []
+    def set_cmake_var(self, file: T.Optional[Path], identifier: str, var: T.Optional[T.List[str]], var_by_file: T.Optional[T.List[str]]) -> None:
+        vars = self.vars
+        if var is None:
+            if identifier in vars:
+                del vars[identifier]
+        else:
+            vars[identifier] = var
 
-    def var_to_str(self, var: str) -> T.Optional[str]:
-        if var in self.vars and self.vars[var]:
-            return self.vars[var][0]
+        if file is not None:
+            vars_by_file = self.vars_by_file.setdefault(file, {})
+            if var_by_file is None:
+                if identifier in vars_by_file:
+                    del vars_by_file[identifier]
+            else:
+                vars_by_file[identifier] = var_by_file
 
-        return None
+    @T.overload
+    def var_to_str(self, file: Path, var: str) -> T.Tuple[T.Optional[str], T.Optional[str]]: ...
+    @T.overload
+    def var_to_str(self, file: None, var: str) -> T.Tuple[T.Optional[str]]: ...
+
+    def var_to_str(self, file: T.Optional[Path], var: str) -> T.Union[T.Tuple[T.Optional[str], T.Optional[str]], T.Tuple[T.Optional[str]]]:
+        if file is not None:
+            var_list, var_by_file_list = self.get_cmake_var(file, var)
+            return (None if not var_list else ';'.join(var_list),
+                    None if not var_by_file_list else ';'.join(var_by_file_list))
+        else:
+            var_list, = self.get_cmake_var(file, var)
+            return (None if not var_list else ';'.join(var_list),)
 
     def _str_to_bool(self, expr: T.Union[str, T.List[str]]) -> bool:
         if not expr:
@@ -277,73 +309,440 @@ class CMakeTraceParser:
         raise CMakeException(f'CMake: {function}() {error}\n{tline}')
 
     def _cmake_set(self, tline: CMakeTraceLine) -> None:
-        """Handler for the CMake set() function in all variaties.
+        """Handler for the CMake set() function in all variants.
 
-        comes in three flavors:
+        Comes in three variants:
         set(<var> <value> [PARENT_SCOPE])
         set(<var> <value> CACHE <type> <docstring> [FORCE])
         set(ENV{<var>} <value>)
 
         We don't support the ENV variant, and any uses of it will be ignored
-        silently. the other two variates are supported, with some caveats:
-        - we don't properly handle scoping, so calls to set() inside a
+        silently. The other two variants are supported, with some caveats:
+        - We don't properly handle scoping, so calls to set() inside a
           function without PARENT_SCOPE set could incorrectly shadow the
           outer scope.
-        - We don't honor the type of CACHE arguments
+        - We don't honor the type of CACHE arguments.
         """
         # DOC: https://cmake.org/cmake/help/latest/command/set.html
 
-        cache_type  = None
-        cache_force = 'FORCE' in tline.args
+        cache_idx = None
+        cache_type = None
+        cache_force = False
         try:
-            cache_idx  = tline.args.index('CACHE')
+            cache_idx = tline.args.index('CACHE')
             cache_type = tline.args[cache_idx + 1]
         except (ValueError, IndexError):
             pass
 
-        # 1st remove PARENT_SCOPE and CACHE from args
-        args = []
-        for i in tline.args:
-            if not i or i == 'PARENT_SCOPE':
-                continue
-
-            # Discard everything after the CACHE keyword
-            if i == 'CACHE':
-                break
-
-            args.append(i)
+        args = list(tline.args)
+        if cache_type:
+            if args[-1:] == ['FORCE']:
+                args.pop(-1)
+                cache_force = True
+            del args[cache_idx:]
+        else:
+            if args[-1:] == ['PARENT_SCOPE']:
+                args.pop(-1)
 
         if len(args) < 1:
             return self._gen_exception('set', 'requires at least one argument', tline)
-
-        # Now that we've removed extra arguments all that should be left is the
-        # variable identifier and the value, join the value back together to
-        # ensure spaces in the value are correctly handled. This assumes that
-        # variable names don't have spaces. Please don't do that...
         identifier = args.pop(0)
-        value = ' '.join(args)
+        if len(args) < 1:
+            value = None
+        else:
+            value = ';'.join(args)
+            value = value.split(';')
 
         # Write to the CMake cache instead
         if cache_type:
             # Honor how the CMake FORCE parameter works
             if identifier not in self.cache or cache_force:
-                self.cache[identifier] = CMakeCacheEntry(value.split(';'), cache_type)
+                self.cache[identifier] = CMakeCacheEntry(value if value is not None else [], cache_type)
 
-        if not value:
-            # Same as unset
-            if identifier in self.vars:
-                del self.vars[identifier]
-        else:
-            self.vars[identifier] = value.split(';')
-            self.vars_by_file.setdefault(tline.file, {})[identifier] = value.split(';')
+        self.set_cmake_var(tline.file, identifier, value, value)
 
     def _cmake_unset(self, tline: CMakeTraceLine) -> None:
         # DOC: https://cmake.org/cmake/help/latest/command/unset.html
         if len(tline.args) < 1:
             return self._gen_exception('unset', 'requires at least one argument', tline)
 
-        if tline.args[0] in self.vars:
-            del self.vars[tline.args[0]]
+        identifier = tline.args[0]
+        self.set_cmake_var(tline.file, identifier, None, None)
+
+    def _cmake_string(self, tline: CMakeTraceLine) -> None:
+        """Handler for the CMake string() function in all variants.
+
+        Comes in twenty-nine variants:
+        string(FIND <string> <substring> <out-var> [...])
+        string(REPLACE <match-string> <replace-string> <out-var> <input>...)
+        string(REGEX MATCH <match-regex> <out-var> <input>...)
+        string(REGEX MATCHALL <match-regex> <out-var> <input>...)
+        string(REGEX REPLACE <match-regex> <replace-expr> <out-var> <input>...)
+        string(APPEND <string-var> [<input>...])
+        string(PREPEND <string-var> [<input>...])
+        string(CONCAT <out-var> [<input>...])
+        string(JOIN <glue> <out-var> [<input>...])
+        string(TOLOWER <string> <out-var>)
+        string(TOUPPER <string> <out-var>)
+        string(LENGTH <string> <out-var>)
+        string(SUBSTRING <string> <begin> <length> <out-var>)
+        string(STRIP <string> <out-var>)
+        string(GENEX_STRIP <string> <out-var>)
+        string(REPEAT <string> <count> <out-var>)
+        string(COMPARE <op> <string1> <string2> <out-var>)
+        string(<HASH> <out-var> <input>)
+        string(ASCII <number>... <out-var>)
+        string(HEX <string> <out-var>)
+        string(CONFIGURE <string> <out-var> [...])
+        string(MAKE_C_IDENTIFIER <string> <out-var>)
+        string(RANDOM [<option>...] <out-var>)
+        string(TIMESTAMP <out-var> [<format string>] [UTC])
+        string(UUID <out-var> ...)
+        string(JSON <out-var> [ERROR_VARIABLE <error-var>]
+               {GET | TYPE | LENGTH | REMOVE}
+               <json-string> <member|index> [<member|index> ...])
+        string(JSON <out-var> [ERROR_VARIABLE <error-var>]
+               MEMBER <json-string>
+               [<member|index> ...] <index>)
+        string(JSON <out-var> [ERROR_VARIABLE <error-var>]
+               SET <json-string>
+               <member|index> [<member|index> ...] <value>)
+        string(JSON <out-var> [ERROR_VARIABLE <error-var>]
+               EQUAL <json-string1> <json-string2>)
+        string(FIND <string> <substring> <out-var> [...])
+
+        We only support the following variants:
+        - FIND
+        - REPLACE
+        - APPEND
+        - PREPEND
+        - TOLOWER
+        - TOUPPER
+        - SUBSTRING
+        - STRIP
+        - COMPARE LESS
+        - COMPARE GREATER
+        - COMPARE EQUAL
+        - COMPARE NOTEQUAL
+        - COMPARE LESS_EQUAL
+        - COMPARE GREATER_EQUAL
+        Any uses of other variants will be ignored silently. The supported
+        variants have some caveats:
+        - We don't properly handle scoping, so calls to string() inside a
+          function could incorrectly shadow the outer scope.
+        """
+        # DOC: https://cmake.org/cmake/help/latest/command/string.html
+
+        args = list(tline.args)
+
+        if len(args) < 1:
+            return self._gen_exception('string', 'requires at least one argument', tline)
+
+        variant = args.pop(0)
+        if variant == 'FIND':
+            value = args.pop(0).encode()
+            sub_value = args.pop(0).encode()
+            output_identifier = args.pop(0)
+            reverse = False
+            if args[-1:] == ['REVERSE']:
+                reverse = True
+                args.pop(-1)
+
+            output_value = value.find(sub_value) if not reverse else value.rfind(sub_value)
+            output_value = str(output_value).split(';')
+            self.set_cmake_var(tline.file, output_identifier, output_value, output_value)
+        elif variant == 'REPLACE':
+            match_value = args.pop(0)
+            replace_value = args.pop(0)
+            output_identifier = args.pop(0)
+            value = ''.join(args)
+
+            output_value = value.replace(match_value, replace_value)
+            output_value = output_value.split(';')
+            self.set_cmake_var(tline.file, output_identifier, output_value, output_value)
+        elif variant == 'APPEND':
+            identifier = args.pop(0)
+            if len(args) > 0:
+                input_value = ''.join(args)
+
+                value, value_by_file = self.get_cmake_var(tline.file, identifier, [])
+                value = ';'.join(value)
+                value_by_file = ';'.join(value_by_file)
+                value += input_value
+                value_by_file += input_value
+                value = value.split(';')
+                value_by_file = value_by_file.split(';')
+                self.set_cmake_var(tline.file, identifier, value, value_by_file)
+        elif variant == 'PREPEND':
+            identifier = args.pop(0)
+            if len(args) > 0:
+                input_value = ''.join(args)
+
+                value, value_by_file = self.get_cmake_var(tline.file, identifier, [])
+                value = ';'.join(value)
+                value_by_file = ';'.join(value_by_file)
+                value = input_value + value
+                value_by_file = input_value + value_by_file
+                value = value.split(';')
+                value_by_file = value_by_file.split(';')
+                self.set_cmake_var(tline.file, identifier, value, value_by_file)
+        elif variant == 'TOLOWER':
+            value = args.pop(0)
+            output_identifier = args.pop(0)
+
+            output_value = value.lower()
+            output_value = output_value.split(';')
+            self.set_cmake_var(tline.file, output_identifier, output_value, output_value)
+        elif variant == 'TOUPPER':
+            value = args.pop(0)
+            output_identifier = args.pop(0)
+
+            output_value = value.upper()
+            output_value = output_value.split(';')
+            self.set_cmake_var(tline.file, output_identifier, output_value, output_value)
+        elif variant == 'SUBSTRING':
+            value = args.pop(0).encode()
+            begin_value = int(args.pop(0))
+            length_value = int(args.pop(0))
+            output_identifier = args.pop(0)
+
+            end_value = length_value if length_value < 0 else begin_value + length_value
+            output_value = value[begin_value:end_value]
+            output_value = output_value.decode().split(';')
+            self.set_cmake_var(tline.file, output_identifier, output_value, output_value)
+        elif variant == 'STRIP':
+            value = args.pop(0)
+            output_identifier = args.pop(0)
+
+            output_value = value.strip(' ')
+            output_value = output_value.split(';')
+            self.set_cmake_var(tline.file, output_identifier, output_value, output_value)
+        elif variant == 'COMPARE':
+            comparison = args.pop(0)
+            left_value = args.pop(0)
+            right_value = args.pop(0)
+            output_identifier = args.pop(0)
+
+            if comparison == 'LESS':
+                output_value = left_value < right_value
+            elif comparison == 'GREATER':
+                output_value = left_value > right_value
+            elif comparison == 'EQUAL':
+                output_value = left_value == right_value
+            elif comparison == 'NOTEQUAL':
+                output_value = left_value != right_value
+            elif comparison == 'LESS_EQUAL':
+                output_value = left_value <= right_value
+            elif comparison == 'GREATER_EQUAL':
+                output_value = left_value >= right_value
+            else:
+                return
+            output_value = 'TRUE' if output_value else 'FALSE'
+            output_value = output_value.split(';')
+            self.set_cmake_var(tline.file, output_identifier, output_value, output_value)
+
+    def _cmake_list(self, tline: CMakeTraceLine) -> None:
+        """Handler for the CMake list() function in all variants.
+
+        Comes in seventeen variants:
+        list(LENGTH <list> <out-var>)
+        list(GET <list> <element index> [<index> ...] <out-var>)
+        list(JOIN <list> <glue> <out-var>)
+        list(SUBLIST <list> <begin> <length> <out-var>)
+        list(FIND <list> <value> <out-var>)
+        list(APPEND <list> [<element>...])
+        list(FILTER <list> {INCLUDE | EXCLUDE} REGEX <regex>)
+        list(INSERT <list> <index> [<element>...])
+        list(POP_BACK <list> [<out-var>...])
+        list(POP_FRONT <list> [<out-var>...])
+        list(PREPEND <list> [<element>...])
+        list(REMOVE_ITEM <list> <value>...)
+        list(REMOVE_AT <list> <index>...)
+        list(REMOVE_DUPLICATES <list>)
+        list(TRANSFORM <list> <ACTION> [...])
+        list(REVERSE <list>)
+        list(SORT <list> [...])
+
+        We only support the following variants:
+        - LENGTH
+        - GET
+        - JOIN
+        - FIND
+        - APPEND
+        - INSERT
+        - POP_BACK
+        - POP_FRONT
+        - PREPEND
+        - REMOVE_ITEM
+        - REMOVE_DUPLICATES
+        Any uses of other variants will be ignored silently. The supported
+        variants have some caveats:
+        - We don't properly handle scoping, so calls to list() inside a
+          function could incorrectly shadow the outer scope.
+        """
+        # DOC: https://cmake.org/cmake/help/latest/command/string.html
+
+        args = list(tline.args)
+
+        if len(args) < 1:
+            return self._gen_exception('string', 'requires at least one argument', tline)
+
+        variant = args.pop(0)
+        if variant == 'LENGTH':
+            identifier = args.pop(0)
+            output_identifier = args.pop(0)
+
+            value, value_by_file = self.get_cmake_var(tline.file, identifier, [])
+            output_value = len(value)
+            output_value_by_file = len(value_by_file)
+            output_value = str(output_value).split(';')
+            output_value_by_file = str(output_value_by_file).split(';')
+            self.set_cmake_var(tline.file, output_identifier, output_value, output_value_by_file)
+        elif variant == 'GET':
+            identifier = args.pop(0)
+            output_identifier = args.pop(-1)
+            index_values = [int(index_value) for index_value in args]
+
+            value, value_by_file = self.get_cmake_var(tline.file, identifier)
+            if value is None:
+                output_value = ['NOTFOUND']
+            else:
+                output_value = [value[index_value] for index_value in index_values]
+            if value_by_file is None:
+                output_value_by_file = ['NOTFOUND']
+            else:
+                output_value_by_file = [value_by_file[index_value] for index_value in index_values]
+            self.set_cmake_var(tline.file, output_identifier, output_value, output_value_by_file)
+        elif variant == 'JOIN':
+            identifier = args.pop(0)
+            glue_value = args.pop(0)
+            output_identifier = args.pop(0)
+
+            value, value_by_file = self.get_cmake_var(tline.file, identifier)
+            if value is None:
+                output_value = ['NOTFOUND']
+            else:
+                output_value = glue_value.join(value)
+                output_value = output_value.split(';')
+            if value_by_file is None:
+                output_value_by_file = ['NOTFOUND']
+            else:
+                output_value_by_file = glue_value.join(value_by_file)
+                output_value_by_file = output_value_by_file.split(';')
+            self.set_cmake_var(tline.file, output_identifier, output_value, output_value_by_file)
+        elif variant == 'FIND':
+            identifier = args.pop(0)
+            search_value = args.pop(0)
+            output_identifier = args.pop(0)
+
+            value, value_by_file = self.get_cmake_var(tline.file, identifier, [])
+            try:
+                output_value = value.index(search_value)
+            except ValueError:
+                output_value = -1
+            try:
+                output_value_by_file = value.index(search_value)
+            except ValueError:
+                output_value_by_file = -1
+            output_value = [str(output_value)]
+            output_value_by_file = [str(output_value_by_file)]
+            self.set_cmake_var(tline.file, output_identifier, output_value, output_value_by_file)
+        elif variant == 'APPEND':
+            identifier = args.pop(0)
+            if len(args) > 0:
+                input_value = [v for arg in args for v in arg.split(';')]
+
+                value, value_by_file = self.get_cmake_var(tline.file, identifier, [])
+                value += input_value
+                value_by_file += input_value
+                self.set_cmake_var(tline.file, identifier, value, value_by_file)
+        elif variant == 'INSERT':
+            identifier = args.pop(0)
+            if len(args) > 0:
+                value = [v for arg in args for v in arg.split(';')]
+
+                value, value_by_file = self.get_cmake_var(tline.file, identifier, [])
+                value = args + value
+                value_by_file = args + value_by_file
+                self.set_cmake_var(tline.file, identifier, value, value_by_file)
+        elif variant == 'POP_BACK':
+            identifier = args.pop(0)
+            output_identifiers = args
+
+            value, value_by_file = self.get_cmake_var(tline.file, identifier, [])
+            if len(output_identifiers) > 0:
+                for output_identifier in output_identifiers:
+                    try:
+                        output_value = [value.pop(-1)]
+                    except IndexError:
+                        output_value = None
+                    try:
+                        output_value_by_file = [value_by_file.pop(-1)]
+                    except IndexError:
+                        output_value_by_file = None
+                    self.set_cmake_var(tline.file, output_identifier, output_value, output_value_by_file)
+            else:
+                try:
+                    value.pop(-1)
+                except IndexError:
+                    None
+                try:
+                    value_by_file.pop(-1)
+                except IndexError:
+                    None
+        elif variant == 'POP_FRONT':
+            identifier = args.pop(0)
+            output_identifiers = args
+
+            value, value_by_file = self.get_cmake_var(tline.file, identifier, [])
+            if len(output_identifiers) > 0:
+                for output_identifier in output_identifiers:
+                    try:
+                        output_value = [value.pop(0)]
+                    except IndexError:
+                        output_value = None
+                    try:
+                        output_value_by_file = [value_by_file.pop(0)]
+                    except IndexError:
+                        output_value_by_file = None
+                    self.set_cmake_var(tline.file, output_identifier, output_value, output_value_by_file)
+            else:
+                try:
+                    value.pop(0)
+                except IndexError:
+                    None
+                try:
+                    value_by_file.pop(0)
+                except IndexError:
+                    None
+        elif variant == 'PREPEND':
+            identifier = args.pop(0)
+            if len(args) > 0:
+                input_value = [v for arg in args for v in arg.split(';')]
+
+                value, value_by_file = self.get_cmake_var(tline.file, identifier, [])
+                value = input_value + value
+                value_by_file = input_value + value_by_file
+                self.set_cmake_var(tline.file, identifier, value, value_by_file)
+        elif variant == 'REMOVE_ITEM':
+            identifier = args.pop(0)
+            search_values = args
+
+            value, value_by_file = self.get_cmake_var(tline.file, identifier)
+            if value is not None:
+                value = list(filter(lambda v: v not in search_values, value))
+            if value_by_file is not None:
+                value_by_file = list(filter(lambda v: v not in search_values, value_by_file))
+            self.set_cmake_var(tline.file, identifier, value, value_by_file)
+        elif variant == 'REMOVE_DUPLICATES':
+            identifier = args.pop(0)
+
+            value, value_by_file = self.get_cmake_var(tline.file, identifier)
+            if value is not None:
+                value = list(dict.fromkeys(value).keys())
+            if value_by_file is not None:
+                value_by_file = list(dict.fromkeys(value_by_file).keys())
+            self.set_cmake_var(tline.file, identifier, value, value_by_file)
 
     def _cmake_add_executable(self, tline: CMakeTraceLine) -> None:
         # DOC: https://cmake.org/cmake/help/latest/command/add_executable.html
@@ -453,8 +852,8 @@ class CMakeTraceParser:
             if fn is not None:
                 fn(i, target)
 
-        cbinary_dir = self.var_to_str('MESON_PS_CMAKE_CURRENT_BINARY_DIR')
-        csource_dir = self.var_to_str('MESON_PS_CMAKE_CURRENT_SOURCE_DIR')
+        cbinary_dir, = self.var_to_str(None, 'MESON_PS_CMAKE_CURRENT_BINARY_DIR')
+        csource_dir, = self.var_to_str(None, 'MESON_PS_CMAKE_CURRENT_SOURCE_DIR')
 
         target.working_dir     = Path(working_dir) if working_dir else None
         target.current_bin_dir = Path(cbinary_dir) if cbinary_dir else None
@@ -483,13 +882,15 @@ class CMakeTraceParser:
         scope = args.pop(0)
 
         append = False
+        append_string = False
         targets = []
         while args:
             curr = args.pop(0)
-            # XXX: APPEND_STRING is specifically *not* supposed to create a
-            # list, is treating them as aliases really okay?
-            if curr == 'APPEND' or curr == 'APPEND_STRING':
+            if curr == 'APPEND':
                 append = True
+                continue
+            if curr == 'APPEND_STRING':
+                append_string = True
                 continue
 
             if curr == 'PROPERTY':
@@ -520,16 +921,21 @@ class CMakeTraceParser:
             if identifier not in tgt.properties:
                 tgt.properties[identifier] = []
 
-            if append:
-                tgt.properties[identifier] += value
+            tgt_properties = tgt.properties[identifier]
+            if append_string:
+                if len(tgt_properties) > 0:
+                    tgt_properties[-1] += value.pop(0)
+                tgt_properties += value
+            elif append:
+                tgt_properties += value
             else:
-                tgt.properties[identifier] = value
+                tgt_properties = value
 
         def do_source(src: str) -> None:
             if identifier != 'HEADER_FILE_ONLY' or not self._str_to_bool(value):
                 return
 
-            current_src_dir = self.var_to_str('MESON_PS_CMAKE_CURRENT_SOURCE_DIR')
+            current_src_dir, = self.var_to_str(None, 'MESON_PS_CMAKE_CURRENT_SOURCE_DIR')
             if not current_src_dir:
                 mlog.warning(textwrap.dedent('''\
                     CMake trace: set_property(SOURCE) called before the preload script was loaded.
@@ -693,7 +1099,7 @@ class CMakeTraceParser:
         self.stored_commands = []
 
     def _meson_ps_reload_vars(self, tline: CMakeTraceLine) -> None:
-        self.delayed_commands = self.get_cmake_var('MESON_PS_DELAYED_CALLS')
+        self.delayed_commands, = self.get_cmake_var(None, 'MESON_PS_DELAYED_CALLS', [])
 
     def _meson_ps_disabled_function(self, tline: CMakeTraceLine) -> None:
         args = list(tline.args)

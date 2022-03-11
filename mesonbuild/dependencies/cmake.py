@@ -210,18 +210,18 @@ class CMakeDependency(ExternalDependency):
             return set(flattened)
 
         # Extract the variables and sanity check them
-        root_paths_set = process_paths(temp_parser.get_cmake_var('MESON_FIND_ROOT_PATH'))
-        root_paths_set.update(process_paths(temp_parser.get_cmake_var('MESON_CMAKE_SYSROOT')))
+        root_paths_set = process_paths(temp_parser.get_cmake_var(None, 'MESON_FIND_ROOT_PATH', [])[0])
+        root_paths_set.update(process_paths(temp_parser.get_cmake_var(None, 'MESON_CMAKE_SYSROOT', [])[0]))
         root_paths = sorted(root_paths_set)
         root_paths = [x for x in root_paths if os.path.isdir(x)]
-        module_paths_set = process_paths(temp_parser.get_cmake_var('MESON_PATHS_LIST'))
+        module_paths_set = process_paths(temp_parser.get_cmake_var(None, 'MESON_PATHS_LIST', [])[0])
         rooted_paths: T.List[str] = []
         for j in [Path(x) for x in root_paths]:
             for p in [Path(x) for x in module_paths_set]:
                 rooted_paths.append(str(j / p.relative_to(p.anchor)))
         module_paths = sorted(module_paths_set.union(rooted_paths))
         module_paths = [x for x in module_paths if os.path.isdir(x)]
-        archs = temp_parser.get_cmake_var('MESON_ARCH_LIST')
+        archs, = temp_parser.get_cmake_var(None, 'MESON_ARCH_LIST', [])
 
         common_paths = ['lib', 'lib32', 'lib64', 'libx32', 'share']
         for i in archs:
@@ -229,7 +229,7 @@ class CMakeDependency(ExternalDependency):
 
         res = CMakeInfo(
             module_paths=module_paths,
-            cmake_root=temp_parser.get_cmake_var('MESON_CMAKE_ROOT')[0],
+            cmake_root=temp_parser.get_cmake_var(None, 'MESON_CMAKE_ROOT', [])[0][0],
             archs=archs,
             common_paths=common_paths,
         )
@@ -428,7 +428,10 @@ class CMakeDependency(ExternalDependency):
             return
 
         # Try to detect the version
-        vers_raw = self.traceparser.get_cmake_var('PACKAGE_VERSION')
+        if self.traceparser is None:
+            vers_raw = []
+        else:
+            vers_raw, = self.traceparser.get_cmake_var(None, 'PACKAGE_VERSION', [])
 
         if len(vers_raw) > 0:
             self.version = vers_raw[0]
@@ -482,9 +485,14 @@ class CMakeDependency(ExternalDependency):
                 for tgt in partial_modules:
                     mlog.debug(tgt)
 
-            incDirs = [x for x in self.traceparser.get_cmake_var('PACKAGE_INCLUDE_DIRS') if x]
-            defs = [x for x in self.traceparser.get_cmake_var('PACKAGE_DEFINITIONS') if x]
-            libs_raw = [x for x in self.traceparser.get_cmake_var('PACKAGE_LIBRARIES') if x]
+            if self.traceparser is None:
+                incDirs = []
+                defs = []
+                libs_raw = []
+            else:
+                incDirs = [x for x in self.traceparser.get_cmake_var(None, 'PACKAGE_INCLUDE_DIRS', [])[0] if x]
+                defs = [x for x in self.traceparser.get_cmake_var(None, 'PACKAGE_DEFINITIONS', [])[0] if x]
+                libs_raw = [x for x in self.traceparser.get_cmake_var(None, 'PACKAGE_LIBRARIES', [])[0] if x]
 
             # CMake has a "fun" API, where certain keywords describing
             # configurations can be in the *_LIBRARIES vraiables. See:
