@@ -53,7 +53,7 @@ class CMakeCacheEntry(T.NamedTuple):
 class CMakeTarget:
     def __init__(
                 self,
-                name:        str,
+                name:        T.Optional[str],
                 target_type: str,
                 properties:  T.Optional[T.Dict[str, T.List[str]]] = None,
                 imported:    bool                                 = False,
@@ -86,7 +86,7 @@ class CMakeTarget:
             assert all(';' not in x for x in self.properties[key])
 
 class CMakeGeneratorTarget(CMakeTarget):
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: T.Optional[str]) -> None:
         super().__init__(name, 'CUSTOM', {})
         self.outputs = []        # type: T.List[Path]
         self.command = []        # type: T.List[T.List[str]]
@@ -220,11 +220,12 @@ class CMakeTraceParser:
 
         for tgt in self.targets.values():
             tgtlist_gen: T.Callable[[T.List[str], CMakeTarget],  T.List[str]] = lambda strlist, t: [parse_generator_expressions(x, self, context_tgt=t) for x in strlist]
-            tgt.name = parse_generator_expressions(tgt.name, self, context_tgt=tgt)
+            if tgt.name is not None:
+                tgt.name = parse_generator_expressions(tgt.name, self, context_tgt=tgt)
             tgt.type = parse_generator_expressions(tgt.type, self, context_tgt=tgt)
             tgt.properties = {
                 k: tgtlist_gen(v, tgt) for k, v in tgt.properties.items()
-            } if tgt.properties is not None else None
+            }
             tgt.depends = tgtlist_gen(tgt.depends, tgt)
 
         for ctgt in self.custom_targets:

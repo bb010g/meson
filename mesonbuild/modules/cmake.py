@@ -40,6 +40,9 @@ from ..interpreterbase import (
     typed_kwargs,
     KwargInfo,
     ContainerTypeInfo,
+
+    TYPE_kwargs,
+    TYPE_var,
 )
 
 if T.TYPE_CHECKING:
@@ -188,16 +191,18 @@ class CMakeSubprojectOptions(ModuleObject):
         self.cmake_options = []  # type: T.List[str]
         self.target_options = TargetOptions()
 
-        self.methods.update(
-            {
-                'add_cmake_defines': self.add_cmake_defines,
-                'set_override_option': self.set_override_option,
-                'set_install': self.set_install,
-                'append_compile_args': self.append_compile_args,
-                'append_link_args': self.append_link_args,
-                'clear': self.clear,
-            }
-        )
+        new_methods: T.Dict[
+            str,
+            T.Callable[[T.List[TYPE_var], TYPE_kwargs], TYPE_var]
+        ] = {
+            'add_cmake_defines': self.add_cmake_defines,
+            'set_override_option': self.set_override_option,
+            'set_install': self.set_install,
+            'append_compile_args': self.append_compile_args,
+            'append_link_args': self.append_link_args,
+            'clear': self.clear,
+        }
+        self.methods.update(new_methods)
 
     def _get_opts(self, kwargs: dict) -> SingleTargetOptions:
         if 'target' in kwargs:

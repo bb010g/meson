@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 if T.TYPE_CHECKING:
-    from ._typing import StringProtocol, SizedStringProtocol
+    from ._typing import SizedSupportsStr, SupportsStr
 
 """This is (mostly) a standalone module used to write logging
 information about Meson runs. Some output goes to screen,
@@ -139,11 +139,11 @@ class AnsiDecorator:
     def __str__(self) -> str:
         return self.get_text(colorize_console())
 
-TV_Loggable = T.Union[str, AnsiDecorator, 'StringProtocol']
+TV_Loggable = T.Union[str, AnsiDecorator, 'SupportsStr']
 TV_LoggableList = T.List[TV_Loggable]
 
 class AnsiText:
-    def __init__(self, *args: 'SizedStringProtocol'):
+    def __init__(self, *args: 'SizedSupportsStr'):
         self.args = args
 
     def __len__(self) -> int:
@@ -286,7 +286,7 @@ def log_once(*args: TV_Loggable, is_error: bool = False,
     _log(*args, is_error=is_error, **kwargs)
 
 # This isn't strictly correct. What we really want here is something like:
-# class StringProtocol(typing_extensions.Protocol):
+# class SupportsStr(typing_extensions.Protocol):
 #
 #      def __str__(self) -> str: ...
 #
