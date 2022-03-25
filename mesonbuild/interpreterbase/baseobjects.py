@@ -13,31 +13,31 @@
 # limitations under the License.
 
 from .. import mparser
+from ..mesonlib import HoldableObject, MesonBugException
 from .exceptions import InvalidCode, InvalidArguments
 from .helpers import flatten, resolve_second_level_holders
 from .operator import MesonOperator
-from ..mesonlib import HoldableObject, MesonBugException
 import textwrap
 
 import typing as T
 from abc import ABCMeta
 
 if T.TYPE_CHECKING:
-    from typing_extensions import Protocol
+    from typing_extensions import ParamSpec, Protocol
 
     # Object holders need the actual interpreter
     from ..interpreter import Interpreter
+    from ..interpreterbase import InterpreterBase
+    from ..modules import ModuleObject, ModuleState
 
-    __T = T.TypeVar('__T', bound=TYPE_var, contravariant=True)
-
-    class OperatorCall(Protocol[__T]):
-        def __call__(self, other: __T) -> TYPE_var: ...
+    PS_rest = ParamSpec('PS_rest')
 
 TV_fw_var = T.Union[str, int, bool, list, dict, 'InterpreterObject']
 TV_fw_args = T.List[T.Union[mparser.BaseNode, TV_fw_var]]
 TV_fw_kwargs = T.Dict[str, T.Union[mparser.BaseNode, TV_fw_var]]
 
 TV_func = T.TypeVar('TV_func', bound=T.Callable[..., T.Any])
+TV_func_result = T.TypeVar('TV_func_result', covariant=True)
 
 TYPE_elementary = T.Union[str, int, bool, T.List[T.Any], T.Dict[str, T.Any]]
 TYPE_var = T.Union[TYPE_elementary, HoldableObject, 'MesonInterpreterObject']
@@ -46,10 +46,123 @@ TYPE_kwargs = T.Dict[str, TYPE_var]
 TYPE_nkwargs = T.Dict[str, TYPE_nvar]
 TYPE_key_resolver = T.Callable[[mparser.BaseNode], str]
 
+if T.TYPE_CHECKING:
+    __T = T.TypeVar('__T', bound=TYPE_var, contravariant=True)
+
+    class OperatorCall(Protocol[__T]):
+        def __call__(self, other: __T) -> TYPE_var: ...
+
 SubProject = T.NewType('SubProject', str)
 
+TV_interpreter_func = T.TypeVar('TV_interpreter_func', bound='InterpreterCallable[InterpreterCallableState, InterpreterCallableArgs[object], InterpreterCallableKwargs[object], object]')
+TV_interpreter_func_arg = T.TypeVar('TV_interpreter_func_arg', contravariant=True)
+TV_interpreter_func_args = T.TypeVar('TV_interpreter_func_args', bound='InterpreterCallableArgs[object]', contravariant=True)
+TV_interpreter_func_args_2 = T.TypeVar('TV_interpreter_func_args_2', bound='InterpreterCallableArgs[object]', contravariant=True)
+TV_interpreter_func_args_co = T.TypeVar('TV_interpreter_func_args_co', bound='InterpreterCallableArgs[object]', covariant=True)
+TV_interpreter_func_kwargs = T.TypeVar('TV_interpreter_func_kwargs', bound='InterpreterCallableKwargs[object]', contravariant=True)
+TV_interpreter_func_kwargs_2 = T.TypeVar('TV_interpreter_func_kwargs_2', bound='InterpreterCallableKwargs[object]', contravariant=True)
+TV_interpreter_func_kwargs_co = T.TypeVar('TV_interpreter_func_kwargs_co', bound='InterpreterCallableKwargs[object]', covariant=True)
+TV_interpreter_func_module_state = T.TypeVar('TV_interpreter_func_module_state', bound='ModuleObject', contravariant=True)
+TV_interpreter_func_module_state_2 = T.TypeVar('TV_interpreter_func_module_state_2', bound='ModuleObject', contravariant=True)
+TV_interpreter_func_module_state_co = T.TypeVar('TV_interpreter_func_module_state_co', bound='ModuleObject', covariant=True)
+TV_interpreter_func_result = T.TypeVar('TV_interpreter_func_result', covariant=True)
+TV_interpreter_func_result_2 = T.TypeVar('TV_interpreter_func_result_2', covariant=True)
+TV_interpreter_func_result_co = T.TypeVar('TV_interpreter_func_result_co', contravariant=True)
+TV_interpreter_func_state = T.TypeVar('TV_interpreter_func_state', bound='InterpreterCallableState', contravariant=True)
+TV_interpreter_func_state_2 = T.TypeVar('TV_interpreter_func_state_2', bound='InterpreterCallableState', contravariant=True)
+TV_interpreter_func_state_co = T.TypeVar('TV_interpreter_func_state_co', bound='InterpreterCallableState', covariant=True)
+TV_interpreter_function = T.TypeVar('TV_interpreter_function', bound='InterpreterFunction[InterpreterCallableState, InterpreterCallableArgs[object], InterpreterCallableKwargs[object], object]')
+TV_interpreter_method = T.TypeVar('TV_interpreter_method', bound='InterpreterMethod[InterpreterCallableState, InterpreterCallableArgs[object], InterpreterCallableKwargs[object], object]')
+TV_interpreter_module_method = T.TypeVar('TV_interpreter_module_method', bound='InterpreterModuleMethod[ModuleObject, InterpreterCallableState, InterpreterCallableArgs[object], InterpreterCallableKwargs[object], object]')
+TV_interpreter_op = T.TypeVar('TV_interpreter_op', bound='InterpreterOperator[InterpreterObject, object, object]')
+TV_interpreter_op_left = T.TypeVar('TV_interpreter_op_left', bound='InterpreterObject', contravariant=True)
+TV_interpreter_op_result = T.TypeVar('TV_interpreter_op_result', covariant=True)
+TV_interpreter_op_right = T.TypeVar('TV_interpreter_op_right', contravariant=True)
+
+InterpreterCallableArgs = T.Sequence[TV_interpreter_func_arg]
+InterpreterCallableKwargs = T.Mapping[str, TV_interpreter_func_arg]
+InterpreterCallableState = T.Union['InterpreterBase', 'InterpreterObject', 'ModuleState']
+
+if T.TYPE_CHECKING:
+    class InterpreterOperator(Protocol[TV_interpreter_op_left, TV_interpreter_op_right, TV_interpreter_op_result]):
+        def __call__(
+            self,
+            __left: TV_interpreter_op_left,
+            __right: TV_interpreter_op_right,
+        ) -> TV_interpreter_op_result: ...
+
+    class InterpreterFunction(Protocol[
+        TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs, TV_interpreter_func_result
+    ]):
+        def __call__(
+            self,
+            __state: TV_interpreter_func_state,
+            __node: mparser.FunctionNode,
+            __args: TV_interpreter_func_args,
+            __kwargs: TV_interpreter_func_kwargs
+        ) -> TV_interpreter_func_result: ...
+
+    class InterpreterMethod(Protocol[
+        TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs, TV_interpreter_func_result
+    ]):
+        def __call__(
+            self,
+            __state: TV_interpreter_func_state,
+            __args: TV_interpreter_func_args,
+            __kwargs: TV_interpreter_func_kwargs
+        ) -> TV_interpreter_func_result: ...
+
+    class InterpreterModuleMethod(Protocol[
+        TV_interpreter_func_module_state, TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs, TV_interpreter_func_result
+    ]):
+        def __call__(
+            self,
+            __module_state: TV_interpreter_func_module_state,
+            __state: TV_interpreter_func_state,
+            __args: TV_interpreter_func_args,
+            __kwargs: TV_interpreter_func_kwargs
+        ) -> TV_interpreter_func_result: ...
+
+InterpreterCallable = T.Union[
+    'InterpreterFunction[TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs, TV_interpreter_func_result]',
+    'InterpreterMethod[TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs, TV_interpreter_func_result]',
+    'InterpreterModuleMethod[ModuleObject, TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs, TV_interpreter_func_result]',
+]
+
+if T.TYPE_CHECKING:
+    class InterpreterCallableDecorator(Protocol[
+        TV_interpreter_func_state_co,
+        TV_interpreter_func_args_co,
+        TV_interpreter_func_kwargs_co,
+        TV_interpreter_func_result_co,
+        TV_interpreter_func_state,
+        TV_interpreter_func_args,
+        TV_interpreter_func_kwargs,
+        TV_interpreter_func_result,
+    ]):
+        @T.overload
+        def __call__(self, __interpreter_func: InterpreterFunction[
+            TV_interpreter_func_state_co, TV_interpreter_func_args_co, TV_interpreter_func_kwargs_co, TV_interpreter_func_result_co
+        ]) -> InterpreterFunction[
+            TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs, TV_interpreter_func_result
+        ]: ...
+
+        @T.overload
+        def __call__(self, __interpreter_func: InterpreterMethod[
+            TV_interpreter_func_state_co, TV_interpreter_func_args_co, TV_interpreter_func_kwargs_co, TV_interpreter_func_result_co
+        ]) -> InterpreterMethod[
+            TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs, TV_interpreter_func_result
+        ]: ...
+
+        @T.overload
+        def __call__(self, __interpreter_func: InterpreterModuleMethod[
+            ModuleObject, TV_interpreter_func_state_co, TV_interpreter_func_args_co, TV_interpreter_func_kwargs_co, TV_interpreter_func_result_co
+        ]) -> InterpreterModuleMethod[
+            ModuleObject, TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs, TV_interpreter_func_result
+        ]: ...
+
 class InterpreterObject:
-    def __init__(self, *, subproject: T.Optional['SubProject'] = None) -> None:
+    def __init__(self, *, subproject: T.Optional[SubProject] = None) -> None:
         self.methods: T.Dict[
             str,
             T.Callable[[T.List[TYPE_var], TYPE_kwargs], TYPE_var]
@@ -64,7 +177,7 @@ class InterpreterObject:
         ] = {}
         # Current node set during a method call. This can be used as location
         # when printing a warning message during a method call.
-        self.current_node:  mparser.BaseNode = None
+        self.current_node: mparser.BaseNode = None
         self.subproject = subproject or SubProject('')
 
         # Some default operators supported by all objects

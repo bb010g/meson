@@ -339,13 +339,16 @@ class ConverterTarget:
         # Use the CMake trace, if required
         tgt = trace.targets.get(self.cmake_name)
         if tgt:
+            # print('ConverterTarget postprocess tgt', tgt)
             self.depends_raw = trace.targets[self.cmake_name].depends
 
             rtgt = resolve_cmake_trace_targets(self.cmake_name, trace, self.env)
+            # print('ConverterTarget postprocess rtgt', rtgt)
             self.includes            += [Path(x) for x in rtgt.include_directories]
             self.link_flags          += rtgt.link_flags
             self.public_compile_opts += rtgt.public_compile_opts
             self.link_libraries      += rtgt.libraries
+            self.link_with           += [ltgt for ltgt_name in rtgt.link_with for ltgt in (output_target_map.target(ltgt_name),) if ltgt is not None]
 
         elif self.type.upper() not in ['EXECUTABLE', 'OBJECT_LIBRARY']:
             mlog.warning('CMake: Target', mlog.bold(self.cmake_name), 'not found in CMake trace. This can lead to build errors')
@@ -921,8 +924,10 @@ class CMakeInterpreter:
         object_libs = []
         custom_target_outputs = []  # type: T.List[str]
         for ctgt in self.custom_targets:
+            # print('analyze postprocess custom_targets', ctgt.cmake_name)
             ctgt.postprocess(self.output_target_map, self.src_dir, custom_target_outputs, self.trace)
         for tgt in self.targets:
+            # print('analyze postprocess targets', tgt.cmake_name)
             tgt.postprocess(self.output_target_map, self.src_dir, self.subdir, self.install_prefix, self.trace)
             if tgt.type == 'OBJECT_LIBRARY':
                 object_libs += [tgt]
@@ -1045,6 +1050,7 @@ class CMakeInterpreter:
                 return indexed(tgt_var, ref.index)
 
         def process_target(tgt: ConverterTarget) -> None:
+            # print('process_target', tgt.cmake_name)
             detect_cycle(tgt)
 
             # First handle inter target dependencies
@@ -1056,16 +1062,19 @@ class CMakeInterpreter:
             custom_targets      = []  # type: T.List[ConverterCustomTarget]
             dependencies        = []  # type: T.List[IdNode]
             for i in tgt.link_with:
+                # print('process_target', tgt.cmake_name, 'link_with', i.cmake_name)
                 assert isinstance(i, ConverterTarget)
                 if i.name not in processed:
                     process_target(i)
                 link_with += [extract_tgt(i)]
             for i in tgt.object_libs:
+                # print('process_target', tgt.cmake_name, 'object_libs', i.cmake_name)
                 assert isinstance(i, ConverterTarget)
                 if i.name not in processed:
                     process_target(i)
                 objec_libs += [extract_tgt(i)]
             for i in tgt.depends:
+                # print('process_target', tgt.cmake_name, 'depends', i.cmake_name)
                 if not isinstance(i, ConverterCustomTarget):
                     continue
                 if i.name not in processed:
@@ -1092,6 +1101,7 @@ class CMakeInterpreter:
             # CMake always ensures that a custom target is executed
             # before another target if at least one output is used.
             for ctgt in custom_targets:
+                # print('custom_targets', ctgt.cmake_name)
                 for j in ctgt.outputs:
                     if not is_header(j) or j in generated_filenames:
                         continue

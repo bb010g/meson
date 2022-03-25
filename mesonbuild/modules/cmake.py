@@ -193,15 +193,14 @@ class CMakeSubprojectOptions(ModuleObject):
 
         new_methods: T.Dict[
             str,
-            T.Callable[[T.List[TYPE_var], TYPE_kwargs], TYPE_var]
-        ] = {
-            'add_cmake_defines': self.add_cmake_defines,
-            'set_override_option': self.set_override_option,
-            'set_install': self.set_install,
-            'append_compile_args': self.append_compile_args,
-            'append_link_args': self.append_link_args,
-            'clear': self.clear,
-        }
+            T.Callable[[ModuleState, T.List[TYPE_var], TYPE_kwargs], TYPE_var]
+        ] = {}
+        new_methods['add_cmake_defines'] = self.add_cmake_defines
+        new_methods['set_override_option'] = self.set_override_option
+        new_methods['set_install'] = self.set_install
+        new_methods['append_compile_args'] = self.append_compile_args
+        new_methods['append_link_args'] = self.append_link_args
+        new_methods['clear'] = self.clear
         self.methods.update(new_methods)
 
     def _get_opts(self, kwargs: dict) -> SingleTargetOptions:

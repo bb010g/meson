@@ -19,6 +19,7 @@ class ResolvedTarget:
         self.link_flags:          T.List[str] = []
         self.public_compile_opts: T.List[str] = []
         self.libraries:           T.List[str] = []
+        self.link_with:           T.List[str] = []
 
 def resolve_cmake_trace_targets(target_name: str,
                                 trace: 'CMakeTraceParser',
@@ -99,6 +100,7 @@ def resolve_cmake_trace_targets(target_name: str,
 
         if 'LINK_LIBRARIES' in tgt.properties:
             targets += [x for x in tgt.properties['LINK_LIBRARIES'] if x]
+            res.link_with += [x for x in tgt.properties['LINK_LIBRARIES'] if x]
         if 'INTERFACE_LINK_LIBRARIES' in tgt.properties:
             targets += [x for x in tgt.properties['INTERFACE_LINK_LIBRARIES'] if x]
 

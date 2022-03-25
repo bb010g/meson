@@ -13,12 +13,11 @@
 # limitations under the License.
 from __future__ import annotations
 
-from .. import mesonlib, mlog
+from .. import mesonlib, mlog, mparser
 from .disabler import Disabler
 from .exceptions import InterpreterException, InvalidArguments
 from ._unholder import _unholder
 
-from dataclasses import dataclass
 from functools import wraps
 import abc
 import itertools
@@ -26,65 +25,163 @@ import copy
 import typing as T
 
 if T.TYPE_CHECKING:
-    from typing_extensions import Protocol
+    from typing_extensions import Protocol, TypedDict
 
-    from .. import mparser
-    from .baseobjects import InterpreterObject, TV_func, TYPE_var, TYPE_kwargs
-    from .interpreterbase import SubProject
+    from ..modules import ModuleObject, ModuleState
+    from .baseobjects import (
+        InterpreterCallable, InterpreterCallableDecorator, InterpreterFunction, InterpreterMethod,
+        InterpreterModuleMethod, InterpreterObject, InterpreterOperator, PS_rest, TV_func, TV_func_result,
+        TV_interpreter_func, TV_interpreter_func_arg, TV_interpreter_func_args, TV_interpreter_func_args_2,
+        TV_interpreter_func_args_co, TV_interpreter_func_kwargs, TV_interpreter_func_kwargs_2,
+        TV_interpreter_func_kwargs_co, TV_interpreter_func_result, TV_interpreter_func_result_2,
+        TV_interpreter_func_result_co, TV_interpreter_func_state, TV_interpreter_func_state_2,
+        TV_interpreter_func_state_co, TV_interpreter_op_left, TV_interpreter_op_result, TV_interpreter_op_right,
+        TYPE_var, TYPE_kwargs,
+    )
+    from .interpreterbase import InterpreterBase, SubProject
     from .operator import MesonOperator
 
-    _TV_IntegerObject = T.TypeVar('_TV_IntegerObject', bound=InterpreterObject, contravariant=True)
-    _TV_ARG1 = T.TypeVar('_TV_ARG1', bound=TYPE_var, contravariant=True)
+def interpreter_func_decorator(decorator: T.Callable[
+    [T.Callable[[TV_interpreter_func_state_co, TV_interpreter_func_args_co, TV_interpreter_func_kwargs_co], TV_interpreter_func_result_co]],
+    T.Callable[[TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs], TV_interpreter_func_result],
+]) -> InterpreterCallableDecorator[
+    TV_interpreter_func_state_co,
+    TV_interpreter_func_args_co,
+    TV_interpreter_func_kwargs_co,
+    TV_interpreter_func_result_co,
+    TV_interpreter_func_state,
+    TV_interpreter_func_args,
+    TV_interpreter_func_kwargs,
+    TV_interpreter_func_result,
+]:
+    @T.overload
+    def wrapped_decorator(
+        interpreter_func: InterpreterFunction[TV_interpreter_func_state_co, TV_interpreter_func_args_co, TV_interpreter_func_kwargs_co, TV_interpreter_func_result_co],
+    ) -> InterpreterFunction[TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs, TV_interpreter_func_result]: ...
 
-    class FN_Operator(Protocol[_TV_IntegerObject, _TV_ARG1]):
-        def __call__(s, self: _TV_IntegerObject, other: _TV_ARG1) -> TYPE_var: ...
-    _TV_FN_Operator = T.TypeVar('_TV_FN_Operator', bound=FN_Operator)
+    @T.overload
+    def wrapped_decorator(
+        interpreter_func: InterpreterMethod[TV_interpreter_func_state_co, TV_interpreter_func_args_co, TV_interpreter_func_kwargs_co, TV_interpreter_func_result_co],
+    ) -> InterpreterMethod[TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs, TV_interpreter_func_result]: ...
 
-def get_callee_args(wrapped_args: T.Sequence[T.Any]) -> T.Tuple['mparser.BaseNode', T.List['TYPE_var'], 'TYPE_kwargs', 'SubProject']:
-    # First argument could be InterpreterBase, InterpreterObject or ModuleObject.
-    # In the case of a ModuleObject it is the 2nd argument (ModuleState) that
-    # contains the needed information.
-    s = wrapped_args[0]
-    if not hasattr(s, 'current_node'):
-        s = wrapped_args[1]
-    node = s.current_node
-    subproject = s.subproject
-    args = kwargs = None
-    if len(wrapped_args) >= 3:
-        args = wrapped_args[-2]
-        kwargs = wrapped_args[-1]
-    return node, args, kwargs, subproject
+    @T.overload
+    def wrapped_decorator(
+        interpreter_func: InterpreterModuleMethod[ModuleObject, TV_interpreter_func_state_co, TV_interpreter_func_args_co, TV_interpreter_func_kwargs_co, TV_interpreter_func_result_co],
+    ) -> InterpreterModuleMethod[ModuleObject, TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs, TV_interpreter_func_result]: ...
 
-def noPosargs(f: TV_func) -> TV_func:
+    @wraps(decorator)
+    def wrapped_decorator(
+        interpreter_func: InterpreterCallable[TV_interpreter_func_state_co, TV_interpreter_func_args_co, TV_interpreter_func_kwargs_co, TV_interpreter_func_result_co],
+    ) -> InterpreterCallable[TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs, TV_interpreter_func_result]:
+        has_args = True
+        storage = None
+
+        # required to avoid contravariant type variables in function parameters
+        def wrap_interpreter_func(
+            inner_interpreter_func: InterpreterCallable[
+                TV_interpreter_func_state_2, TV_interpreter_func_args_2, TV_interpreter_func_kwargs_2, TV_interpreter_func_result_2
+            ]
+        ) -> T.Callable[[
+                TV_interpreter_func_state_2, TV_interpreter_func_args_2, TV_interpreter_func_kwargs_2
+        ], TV_interpreter_func_result_2]:
+            @wraps(inner_interpreter_func)
+            def wrapped_interpreter_func(
+                state: TV_interpreter_func_state_2, args: TV_interpreter_func_args_2, kwargs: TV_interpreter_func_kwargs_2
+            ) -> TV_interpreter_func_result_2:
+                nonlocal has_args, storage
+                if storage is None:
+                    if not has_args:
+                        return inner_interpreter_func(state, args)
+                    return T.cast(
+                        'InterpreterMethod[TV_interpreter_func_state_2, TV_interpreter_func_args_2, TV_interpreter_func_kwargs_2, TV_interpreter_func_result_2]', inner_interpreter_func
+                    )(state, args, kwargs)
+                if isinstance(storage, mparser.FunctionNode):
+                    return T.cast(
+                        'InterpreterFunction[TV_interpreter_func_state_2, TV_interpreter_func_args_2, TV_interpreter_func_kwargs_2, TV_interpreter_func_result_2]', inner_interpreter_func
+                    )(state, storage, args, kwargs)
+                return T.cast(
+                    'InterpreterModuleMethod[ModuleObject, TV_interpreter_func_state_2, TV_interpreter_func_args_2, TV_interpreter_func_kwargs_2, TV_interpreter_func_result_2]', inner_interpreter_func
+                )(storage, state, args, kwargs)
+            return wrapped_interpreter_func
+
+        wrapped_interpreter_func = wrap_interpreter_func(interpreter_func)
+        decorated_interpreter_func = decorator(wrapped_interpreter_func)
+
+        @T.overload
+        def wrapped_decorated_interpreter_func(__state: TV_interpreter_func_state, __node: mparser.FunctionNode, __args: TV_interpreter_func_args, __kwargs: TV_interpreter_func_kwargs) -> TV_interpreter_func_result: ...
+        @T.overload
+        def wrapped_decorated_interpreter_func(__state: TV_interpreter_func_state, __args: TV_interpreter_func_args, __kwargs: TV_interpreter_func_kwargs) -> TV_interpreter_func_result: ...
+        @T.overload
+        def wrapped_decorated_interpreter_func(__module_state: ModuleObject, __state: TV_interpreter_func_state, __args: TV_interpreter_func_args, __kwargs: TV_interpreter_func_kwargs) -> TV_interpreter_func_result: ...
+
+        @wraps(interpreter_func)
+        def wrapped_decorated_interpreter_func(*interpreter_func_args: T.Any) -> TV_interpreter_func_result:
+            nonlocal has_args, storage
+            state: TV_interpreter_func_state
+            args: TV_interpreter_func_args
+            kwargs: TV_interpreter_func_kwargs
+            if len(interpreter_func_args) == 2:
+                state, other = interpreter_func_args
+                has_args = False
+                return decorated_interpreter_func(state, other, None)
+            if len(interpreter_func_args) == 3:
+                state, args, kwargs = interpreter_func_args
+            else:
+                assert len(interpreter_func_args) == 4
+                if isinstance(interpreter_func_args[1], mparser.FunctionNode):
+                    node: mparser.FunctionNode
+                    state, node, args, kwargs = interpreter_func_args
+                    storage = node
+                else:
+                    module_state: ModuleObject
+                    module_state, state, args, kwargs = interpreter_func_args
+                    storage = module_state
+            return decorated_interpreter_func(state, args, kwargs)
+        return wrapped_decorated_interpreter_func
+    return wrapped_decorator
+
+@interpreter_func_decorator
+def noPosargs(
+    f: T.Callable[[TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs], TV_interpreter_func_result]
+) -> T.Callable[[TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs], TV_interpreter_func_result]:
     @wraps(f)
-    def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-        args = get_callee_args(wrapped_args)[1]
+    def wrapped(
+        state: TV_interpreter_func_state, args: TV_interpreter_func_args, kwargs: TV_interpreter_func_kwargs
+    ) -> TV_interpreter_func_result:
         if args:
             raise InvalidArguments('Function does not take positional arguments.')
-        return f(*wrapped_args, **wrapped_kwargs)
-    return T.cast('TV_func', wrapped)
+        return f(state, args, kwargs)
+    return wrapped
 
-def noKwargs(f: TV_func) -> TV_func:
+@interpreter_func_decorator
+def noKwargs(
+    f: T.Callable[[TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs], TV_interpreter_func_result]
+) -> T.Callable[[TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs], TV_interpreter_func_result]:
     @wraps(f)
-    def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-        kwargs = get_callee_args(wrapped_args)[2]
+    def wrapped(
+        state: TV_interpreter_func_state, args: TV_interpreter_func_args, kwargs: TV_interpreter_func_kwargs
+    ) -> TV_interpreter_func_result:
         if kwargs:
             raise InvalidArguments('Function does not take keyword arguments.')
-        return f(*wrapped_args, **wrapped_kwargs)
-    return T.cast('TV_func', wrapped)
+        return f(state, args, kwargs)
+    return wrapped
 
-def stringArgs(f: TV_func) -> TV_func:
+@interpreter_func_decorator
+def stringArgs(
+    f: T.Callable[[TV_interpreter_func_state, T.List[str], TV_interpreter_func_kwargs], TV_interpreter_func_result]
+) -> T.Callable[[TV_interpreter_func_state, T.List[str], TV_interpreter_func_kwargs], TV_interpreter_func_result]:
     @wraps(f)
-    def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-        args = get_callee_args(wrapped_args)[1]
+    def wrapped(
+        state: TV_interpreter_func_state, args: T.List[str], kwargs: TV_interpreter_func_kwargs
+    ) -> TV_interpreter_func_result:
         if not isinstance(args, list):
             mlog.debug('Not a list:', str(args))
             raise InvalidArguments('Argument not a list.')
         if not all(isinstance(s, str) for s in args):
             mlog.debug('Element not a string:', str(args))
             raise InvalidArguments('Arguments must be strings.')
-        return f(*wrapped_args, **wrapped_kwargs)
-    return T.cast('TV_func', wrapped)
+        return f(state, args, kwargs)
+    return wrapped
 
 def noArgsFlattening(f: TV_func) -> TV_func:
     setattr(f, 'no-args-flattening', True)  # noqa: B010
@@ -94,76 +191,197 @@ def noSecondLevelHolderResolving(f: TV_func) -> TV_func:
     setattr(f, 'no-second-level-holder-flattening', True)  # noqa: B010
     return f
 
-def unholder_return(f: TV_func) -> T.Callable[..., TYPE_var]:
+def unholder_return(f: T.Callable[PS_rest, InterpreterObject]) -> T.Callable[PS_rest, TYPE_var]:
     @wraps(f)
-    def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-        res = f(*wrapped_args, **wrapped_kwargs)
+    def wrapped(*meta_args: PS_rest.args, **meta_kwargs: PS_rest.kwargs) -> TYPE_var:
+        res = f(*meta_args, **meta_kwargs)
         return _unholder(res)
-    return T.cast('T.Callable[..., TYPE_var]', wrapped)
+    return wrapped
 
-def disablerIfNotFound(f: TV_func) -> TV_func:
+if T.TYPE_CHECKING:
+    # https://github.com/python/mypy/issues/4617
+    # DisablerDict = TypedDict('DisablerDict', {'disabler': bool}, total=False)
+
+    class SupportsFound(Protocol):
+        def found(self) -> bool: ...
+
+    TV_disabler_dict = T.TypeVar('TV_disabler_dict', bound='T.Dict[str, object]')
+    TV_supports_found = T.TypeVar('TV_supports_found', bound='SupportsFound')
+
+@interpreter_func_decorator
+def disablerIfNotFound(
+    f: T.Callable[[TV_interpreter_func_state, TV_interpreter_func_args, TV_disabler_dict], TV_supports_found]
+) -> T.Callable[[
+    TV_interpreter_func_state, TV_interpreter_func_args, TV_disabler_dict
+], T.Union[TV_supports_found, Disabler]]:
     @wraps(f)
-    def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-        kwargs = get_callee_args(wrapped_args)[2]
+    def wrapped(
+        state: TV_interpreter_func_state, args: TV_interpreter_func_args, kwargs: TV_disabler_dict
+    ) -> T.Union[TV_supports_found, Disabler]:
         disabler = kwargs.pop('disabler', False)
-        ret = f(*wrapped_args, **wrapped_kwargs)
+        ret = f(state, args, kwargs)
         if disabler and not ret.found():
             return Disabler()
         return ret
-    return T.cast('TV_func', wrapped)
+    return wrapped
 
-@dataclass(repr=False, eq=False)
-class permittedKwargs:
-    permitted: T.Set[str]
-
-    def __call__(self, f: TV_func) -> TV_func:
+def permittedKwargs(permitted: T.Set[str]) -> InterpreterCallableDecorator[
+    TV_interpreter_func_state,
+    TV_interpreter_func_args,
+    TV_interpreter_func_kwargs,
+    TV_interpreter_func_result,
+    TV_interpreter_func_state,
+    TV_interpreter_func_args,
+    TV_interpreter_func_kwargs,
+    TV_interpreter_func_result
+]:
+    @interpreter_func_decorator
+    def inner(
+        f: T.Callable[[TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs], TV_interpreter_func_result]
+    ) -> T.Callable[[TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs], TV_interpreter_func_result]:
         @wraps(f)
-        def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-            kwargs = get_callee_args(wrapped_args)[2]
-            unknowns = set(kwargs).difference(self.permitted)
+        def wrapped(
+            state: TV_interpreter_func_state, args: TV_interpreter_func_args, kwargs: TV_interpreter_func_kwargs
+        ) -> TV_interpreter_func_result:
+            unknowns = set(kwargs).difference(permitted)
             if unknowns:
                 ustr = ', '.join([f'"{u}"' for u in sorted(unknowns)])
                 raise InvalidArguments(f'Got unknown keyword arguments {ustr}')
-            return f(*wrapped_args, **wrapped_kwargs)
-        return T.cast('TV_func', wrapped)
+            return f(state, args, kwargs)
+        return wrapped
+    return inner
 
-def typed_operator(operator: MesonOperator,
-                   types: T.Union[T.Type, T.Tuple[T.Type, ...]]) -> T.Callable[['_TV_FN_Operator'], '_TV_FN_Operator']:
+def typed_operator(operator: MesonOperator, types: T.Union[T.Type, T.Tuple[T.Type, ...]]) -> T.Callable[[
+    InterpreterOperator[TV_interpreter_op_left, TV_interpreter_op_right, TV_interpreter_op_result]
+], InterpreterOperator[TV_interpreter_op_left, TV_interpreter_op_right, TV_interpreter_op_result]]:
     """Decorator that does type checking for operator calls.
 
     The principle here is similar to typed_pos_args, however much simpler
     since only one other object ever is passed
     """
-    def inner(f: '_TV_FN_Operator') -> '_TV_FN_Operator':
+    def inner(
+        f: InterpreterOperator[TV_interpreter_op_left, TV_interpreter_op_right, TV_interpreter_op_result]
+    ) -> InterpreterOperator[TV_interpreter_op_left, TV_interpreter_op_right, TV_interpreter_op_result]:
         @wraps(f)
-        def wrapper(self: 'InterpreterObject', other: TYPE_var) -> TYPE_var:
-            if not isinstance(other, types):
-                raise InvalidArguments(f'The `{operator.value}` of {self.display_name()} does not accept objects of type {type(other).__name__} ({other})')
-            return f(self, other)
-        return T.cast('_TV_FN_Operator', wrapper)
+        def wrapped(left: TV_interpreter_op_left, right: TV_interpreter_op_right) -> TV_interpreter_op_result:
+            if not isinstance(right, types):
+                raise InvalidArguments(f'The `{operator.value}` of {left.display_name()} does not accept objects of type {type(right).__name__} ({right})')
+            return f(left, right)
+        return wrapped
     return inner
 
-def unary_operator(operator: MesonOperator) -> T.Callable[['_TV_FN_Operator'], '_TV_FN_Operator']:
+def unary_operator(operator: MesonOperator) -> T.Callable[[
+    InterpreterOperator[TV_interpreter_op_left, None, TV_interpreter_op_result]
+], InterpreterOperator[TV_interpreter_op_left, None, TV_interpreter_op_result]]:
     """Decorator that does type checking for unary operator calls.
 
     This decorator is for unary operators that do not take any other objects.
     It should be impossible for a user to accidentally break this. Triggering
     this check always indicates a bug in the Meson interpreter.
     """
-    def inner(f: '_TV_FN_Operator') -> '_TV_FN_Operator':
+    def inner(
+        f: InterpreterOperator[TV_interpreter_op_left, None, TV_interpreter_op_result]
+    ) -> InterpreterOperator[TV_interpreter_op_left, None, TV_interpreter_op_result]:
         @wraps(f)
-        def wrapper(self: 'InterpreterObject', other: TYPE_var) -> TYPE_var:
-            if other is not None:
-                raise mesonlib.MesonBugException(f'The unary operator `{operator.value}` of {self.display_name()} was passed the object {other} of type {type(other).__name__}')
-            return f(self, other)
-        return T.cast('_TV_FN_Operator', wrapper)
+        def wrapped(left: TV_interpreter_op_left, right: None) -> TV_interpreter_op_result:
+            if right is not None:
+                raise mesonlib.MesonBugException(f'The unary operator `{operator.value}` of {left.display_name()} was passed the object {right} of type {type(right).__name__}')
+            return f(left, right)
+        return wrapped
     return inner
 
+@T.overload
+def typed_pos_args(
+    __name: str,
+    *types: T.Union[T.Type, T.Tuple[T.Type, ...]],
+    varargs: None = None,
+    optargs: None = None,
+    min_varargs: int = ...,
+    max_varargs: int = ...,
+) -> InterpreterCallableDecorator[
+    TV_interpreter_func_state,
+    T.Tuple[TV_interpreter_func_arg, ...],
+    TV_interpreter_func_kwargs,
+    TV_interpreter_func_result,
+    TV_interpreter_func_state,
+    T.List[TV_interpreter_func_arg],
+    TV_interpreter_func_kwargs,
+    TV_interpreter_func_result
+]: ...
 
-def typed_pos_args(name: str, *types: T.Union[T.Type, T.Tuple[T.Type, ...]],
-                   varargs: T.Optional[T.Union[T.Type, T.Tuple[T.Type, ...]]] = None,
-                   optargs: T.Optional[T.List[T.Union[T.Type, T.Tuple[T.Type, ...]]]] = None,
-                   min_varargs: int = 0, max_varargs: int = 0) -> T.Callable[..., T.Any]:
+@T.overload
+def typed_pos_args(
+    __name: str,
+    *types: T.Union[T.Type, T.Tuple[T.Type, ...]],
+    varargs: None = None,
+    optargs: T.Optional[T.List[T.Union[T.Type, T.Tuple[T.Type, ...]]]] = None,
+    min_varargs: int = ...,
+    max_varargs: int = ...,
+) -> InterpreterCallableDecorator[
+    TV_interpreter_func_state,
+    T.Tuple[T.Optional[TV_interpreter_func_arg], ...],
+    TV_interpreter_func_kwargs,
+    TV_interpreter_func_result,
+    TV_interpreter_func_state,
+    T.List[TV_interpreter_func_arg],
+    TV_interpreter_func_kwargs,
+    TV_interpreter_func_result
+]: ...
+
+@T.overload
+def typed_pos_args(
+    __name: str,
+    varargs: T.Union[T.Type, T.Tuple[T.Type, ...]],
+    optargs: None = None,
+    min_varargs: int = ...,
+    max_varargs: int = ...,
+) -> InterpreterCallableDecorator[
+    TV_interpreter_func_state,
+    T.Tuple[T.List[TV_interpreter_func_arg]],
+    TV_interpreter_func_kwargs,
+    TV_interpreter_func_result,
+    TV_interpreter_func_state,
+    T.List[TV_interpreter_func_arg],
+    TV_interpreter_func_kwargs,
+    TV_interpreter_func_result
+]: ...
+
+@T.overload
+def typed_pos_args(
+    __name: str,
+    *types: T.Union[T.Type, T.Tuple[T.Type, ...]],
+    varargs: T.Optional[T.Union[T.Type, T.Tuple[T.Type, ...]]] = None,
+    optargs: T.Optional[T.List[T.Union[T.Type, T.Tuple[T.Type, ...]]]] = None,
+    min_varargs: int = 0,
+    max_varargs: int = 0,
+) -> InterpreterCallableDecorator[
+    TV_interpreter_func_state,
+    T.Tuple[T.Union[T.Optional[TV_interpreter_func_arg], T.List[TV_interpreter_func_arg]], ...],
+    TV_interpreter_func_kwargs,
+    TV_interpreter_func_result,
+    TV_interpreter_func_state,
+    T.List[TV_interpreter_func_arg],
+    TV_interpreter_func_kwargs,
+    TV_interpreter_func_result
+]: ...
+
+def typed_pos_args(
+    __name: str,
+    *types: T.Union[T.Type, T.Tuple[T.Type, ...]],
+    varargs: T.Optional[T.Union[T.Type, T.Tuple[T.Type, ...]]] = None,
+    optargs: T.Optional[T.List[T.Union[T.Type, T.Tuple[T.Type, ...]]]] = None,
+    min_varargs: int = 0,
+    max_varargs: int = 0,
+) -> InterpreterCallableDecorator[
+    TV_interpreter_func_state,
+    T.Tuple[T.Union[T.Optional[TV_interpreter_func_arg], T.List[TV_interpreter_func_arg]], ...],
+    TV_interpreter_func_kwargs,
+    TV_interpreter_func_result,
+    TV_interpreter_func_state,
+    T.List[TV_interpreter_func_arg],
+    TV_interpreter_func_kwargs,
+    TV_interpreter_func_result
+]:
     """Decorator that types type checking of positional arguments.
 
     This supports two different models of optional arguments, the first is the
@@ -175,7 +393,7 @@ def typed_pos_args(name: str, *types: T.Union[T.Type, T.Tuple[T.Type, ...]],
 
     This function does not support mixing variadic and default arguments.
 
-    :name: The name of the decorated function (as displayed in error messages)
+    :__name: The name of the decorated function (as displayed in error messages)
     :varargs: They type(s) of any variadic arguments the function takes. If
         None the function takes no variadic args
     :min_varargs: the minimum number of variadic arguments taken
@@ -208,12 +426,20 @@ def typed_pos_args(name: str, *types: T.Union[T.Type, T.Tuple[T.Type, ...]],
     correct, all of the arguments are string names of files. If the first
     argument is something else the it should be separated.
     """
-    def inner(f: TV_func) -> TV_func:
-
+    @interpreter_func_decorator
+    def inner(
+        f: T.Callable[[
+            TV_interpreter_func_state,
+            T.Tuple[T.Union[T.Optional[TV_interpreter_func_arg], T.List[TV_interpreter_func_arg]], ...],
+            TV_interpreter_func_kwargs
+        ], TV_interpreter_func_result]
+    ) -> T.Callable[[
+        TV_interpreter_func_state, T.List[TV_interpreter_func_arg], TV_interpreter_func_kwargs
+    ], TV_interpreter_func_result]:
         @wraps(f)
-        def wrapper(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-            args = get_callee_args(wrapped_args)[1]
-
+        def wrapped(
+            state: TV_interpreter_func_state, args: T.List[TV_interpreter_func_arg], kwargs: TV_interpreter_func_kwargs
+        ) -> TV_interpreter_func_result:
             # These are implementation programming errors, end users should never see them.
             assert isinstance(args, list), args
             assert max_varargs >= 0, 'max_varags cannot be negative'
@@ -229,20 +455,20 @@ def typed_pos_args(name: str, *types: T.Union[T.Type, T.Tuple[T.Type, ...]],
                 min_args = num_types + min_varargs
                 max_args = num_types + max_varargs
                 if max_varargs == 0 and num_args < min_args:
-                    raise InvalidArguments(f'{name} takes at least {min_args} arguments, but got {num_args}.')
+                    raise InvalidArguments(f'{__name} takes at least {min_args} arguments, but got {num_args}.')
                 elif max_varargs != 0 and (num_args < min_args or num_args > max_args):
-                    raise InvalidArguments(f'{name} takes between {min_args} and {max_args} arguments, but got {num_args}.')
+                    raise InvalidArguments(f'{__name} takes between {min_args} and {max_args} arguments, but got {num_args}.')
             elif optargs:
                 if num_args < num_types:
-                    raise InvalidArguments(f'{name} takes at least {num_types} arguments, but got {num_args}.')
+                    raise InvalidArguments(f'{__name} takes at least {num_types} arguments, but got {num_args}.')
                 elif num_args > num_types + len(optargs):
-                    raise InvalidArguments(f'{name} takes at most {num_types + len(optargs)} arguments, but got {num_args}.')
+                    raise InvalidArguments(f'{__name} takes at most {num_types + len(optargs)} arguments, but got {num_args}.')
                 # Add the number of positional arguments required
                 if num_args > num_types:
                     diff = num_args - num_types
                     a_types = tuple(list(types) + list(optargs[:diff]))
             elif num_args != num_types:
-                raise InvalidArguments(f'{name} takes exactly {num_types} arguments, but got {num_args}.')
+                raise InvalidArguments(f'{__name} takes exactly {num_types} arguments, but got {num_args}.')
 
             for i, (arg, type_) in enumerate(itertools.zip_longest(args, a_types, fillvalue=varargs), start=1):
                 if not isinstance(arg, type_):
@@ -250,35 +476,29 @@ def typed_pos_args(name: str, *types: T.Union[T.Type, T.Tuple[T.Type, ...]],
                         shouldbe = 'one of: {}'.format(", ".join(f'"{t.__name__}"' for t in type_))
                     else:
                         shouldbe = f'"{type_.__name__}"'
-                    raise InvalidArguments(f'{name} argument {i} was of type "{type(arg).__name__}" but should have been {shouldbe}')
+                    raise InvalidArguments(f'{__name} argument {i} was of type "{type(arg).__name__}" but should have been {shouldbe}')
 
             # Ensure that we're actually passing a tuple.
             # Depending on what kind of function we're calling the length of
             # wrapped_args can vary.
-            nargs = list(wrapped_args)
-            i = nargs.index(args)
             if varargs:
                 # if we have varargs we need to split them into a separate
                 # tuple, as python's typing doesn't understand tuples with
                 # fixed elements and variadic elements, only one or the other.
                 # so in that case we need T.Tuple[int, str, float, T.Tuple[str, ...]]
-                pos = args[:len(types)]
-                var = list(args[len(types):])
-                pos.append(var)
-                nargs[i] = tuple(pos)
-            elif optargs:
-                if num_args < num_types + len(optargs):
-                    diff = num_types + len(optargs) - num_args
-                    nargs[i] = tuple(list(args) + [None] * diff)
-                else:
-                    nargs[i] = args
-            else:
-                nargs[i] = tuple(args)
-            return f(*nargs, **wrapped_kwargs)
-
-        return T.cast('TV_func', wrapper)
+                args_tuple = tuple(itertools.chain(args[:len(types)], (args[len(types):],)))
+                # print(f.__name__, 'args_tuple:', args_tuple, 'kwargs:', kwargs)
+                return f(state, args_tuple, kwargs)
+            if optargs and num_args < num_types + len(optargs):
+                diff = num_types + len(optargs) - num_args
+                args_tuple = tuple(itertools.chain(args, itertools.repeat(None, diff)))
+                # print(f.__name__, 'args_tuple:', args_tuple, 'kwargs:', kwargs)
+                return f(state, args_tuple, kwargs)
+            args_tuple = tuple(args)
+            # print(f.__name__, 'args_tuple:', args_tuple, 'kwargs:', kwargs)
+            return f(state, args_tuple, kwargs)
+        return wrapped
     return inner
-
 
 class ContainerTypeInfo:
 
@@ -339,15 +559,14 @@ class ContainerTypeInfo:
             s += ' that cannot be empty'
         return s
 
-_T = T.TypeVar('_T')
+_TV = T.TypeVar('_TV')
 
 class _NULL_T:
     """Special null type for evolution, this is an implementation detail."""
 
-
 _NULL = _NULL_T()
 
-class KwargInfo(T.Generic[_T]):
+class KwargInfo(T.Generic[_TV]):
 
     """A description of a keyword argument to a meson function
 
@@ -384,17 +603,17 @@ class KwargInfo(T.Generic[_T]):
         set by the user.
     """
     def __init__(self, name: str,
-                 types: T.Union[T.Type[_T], T.Tuple[T.Union[T.Type[_T], ContainerTypeInfo], ...], ContainerTypeInfo],
+                 types: T.Union[T.Type[_TV], T.Tuple[T.Union[T.Type[_TV], ContainerTypeInfo], ...], ContainerTypeInfo],
                  *, required: bool = False, listify: bool = False,
-                 default: T.Optional[_T] = None,
+                 default: T.Optional[_TV] = None,
                  since: T.Optional[str] = None,
                  since_message: T.Optional[str] = None,
-                 since_values: T.Optional[T.Dict[_T, T.Union[str, T.Tuple[str, str]]]] = None,
+                 since_values: T.Optional[T.Dict[_TV, T.Union[str, T.Tuple[str, str]]]] = None,
                  deprecated: T.Optional[str] = None,
                  deprecated_message: T.Optional[str] = None,
-                 deprecated_values: T.Optional[T.Dict[_T, T.Union[str, T.Tuple[str, str]]]] = None,
+                 deprecated_values: T.Optional[T.Dict[_TV, T.Union[str, T.Tuple[str, str]]]] = None,
                  validator: T.Optional[T.Callable[[T.Any], T.Optional[str]]] = None,
-                 convertor: T.Optional[T.Callable[[_T], object]] = None,
+                 convertor: T.Optional[T.Callable[[_TV], object]] = None,
                  not_set_warning: T.Optional[str] = None):
         self.name = name
         self.types = types
@@ -415,15 +634,15 @@ class KwargInfo(T.Generic[_T]):
                name: T.Union[str, _NULL_T] = _NULL,
                required: T.Union[bool, _NULL_T] = _NULL,
                listify: T.Union[bool, _NULL_T] = _NULL,
-               default: T.Union[_T, None, _NULL_T] = _NULL,
+               default: T.Union[_TV, None, _NULL_T] = _NULL,
                since: T.Union[str, None, _NULL_T] = _NULL,
                since_message: T.Union[str, None, _NULL_T] = _NULL,
-               since_values: T.Union[T.Dict[_T, T.Union[str, T.Tuple[str, str]]], None, _NULL_T] = _NULL,
+               since_values: T.Union[T.Dict[_TV, T.Union[str, T.Tuple[str, str]]], None, _NULL_T] = _NULL,
                deprecated: T.Union[str, None, _NULL_T] = _NULL,
                deprecated_message: T.Union[str, None, _NULL_T] = _NULL,
-               deprecated_values: T.Union[T.Dict[_T, T.Union[str, T.Tuple[str, str]]], None, _NULL_T] = _NULL,
-               validator: T.Union[T.Callable[[_T], T.Optional[str]], None, _NULL_T] = _NULL,
-               convertor: T.Union[T.Callable[[_T], TYPE_var], None, _NULL_T] = _NULL) -> 'KwargInfo':
+               deprecated_values: T.Union[T.Dict[_TV, T.Union[str, T.Tuple[str, str]]], None, _NULL_T] = _NULL,
+               validator: T.Union[T.Callable[[_TV], T.Optional[str]], None, _NULL_T] = _NULL,
+               convertor: T.Union[T.Callable[[_TV], TYPE_var], None, _NULL_T] = _NULL) -> 'KwargInfo':
         """Create a shallow copy of this KwargInfo, with modifications.
 
         This allows us to create a new copy of a KwargInfo with modifications.
@@ -451,8 +670,18 @@ class KwargInfo(T.Generic[_T]):
             convertor=convertor if not isinstance(convertor, _NULL_T) else self.convertor,
         )
 
+_TV_typed_kwargs_dict = T.TypeVar('_TV_typed_kwargs_dict', bound='T.Dict[str, object]')
 
-def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
+def typed_kwargs(name: str, *types: KwargInfo) -> InterpreterCallableDecorator[
+    TV_interpreter_func_state,
+    TV_interpreter_func_args,
+    _TV_typed_kwargs_dict,
+    TV_interpreter_func_result,
+    TV_interpreter_func_state,
+    TV_interpreter_func_args,
+    _TV_typed_kwargs_dict,
+    TV_interpreter_func_result
+]:
     """Decorator for type checking keyword arguments.
 
     Used to wrap a meson DSL implementation function, where it checks various
@@ -467,8 +696,10 @@ def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
         (if applicable)
     :param *types: KwargInfo entries for each keyword argument.
     """
-    def inner(f: TV_func) -> TV_func:
-
+    @interpreter_func_decorator
+    def inner(
+        f: T.Callable[[TV_interpreter_func_state, TV_interpreter_func_args, _TV_typed_kwargs_dict], TV_interpreter_func_result]
+    ) -> T.Callable[[TV_interpreter_func_state, TV_interpreter_func_args, _TV_typed_kwargs_dict], TV_interpreter_func_result]:
         def types_description(types_tuple: T.Tuple[T.Union[T.Type, ContainerTypeInfo], ...]) -> str:
             candidates = []
             for t in types_tuple:
@@ -503,8 +734,9 @@ def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
             return False
 
         @wraps(f)
-        def wrapper(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-
+        def wrapped(
+            state: TV_interpreter_func_state, args: TV_interpreter_func_args, kwargs: _TV_typed_kwargs_dict
+        ) -> TV_interpreter_func_result:
             def emit_feature_change(values: T.Dict[str, T.Union[str, T.Tuple[str, str]]], feature: T.Union[T.Type['FeatureDeprecated'], T.Type['FeatureNew']]) -> None:
                 for n, version in values.items():
                     if isinstance(value, (dict, list)):
@@ -517,11 +749,7 @@ def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
                             version, msg = version
                         else:
                             msg = None
-                        feature.single_use(f'"{name}" keyword argument "{info.name}" value "{n}"', version, subproject, msg, location=node)
-
-            node, _, _kwargs, subproject = get_callee_args(wrapped_args)
-            # Cast here, as the convertor function may place something other than a TYPE_var in the kwargs
-            kwargs = T.cast('T.Dict[str, object]', _kwargs)
+                        feature.single_use(f'"{name}" keyword argument "{info.name}" value "{n}"', version, state.subproject, msg, location=state.current_node)
 
             all_names = {t.name for t in types}
             unknowns = set(kwargs).difference(all_names)
@@ -535,10 +763,10 @@ def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
                 if value is not None:
                     if info.since:
                         feature_name = info.name + ' arg in ' + name
-                        FeatureNew.single_use(feature_name, info.since, subproject, info.since_message, location=node)
+                        FeatureNew.single_use(feature_name, info.since, state.subproject, info.since_message, location=state.current_node)
                     if info.deprecated:
                         feature_name = info.name + ' arg in ' + name
-                        FeatureDeprecated.single_use(feature_name, info.deprecated, subproject, info.deprecated_message, location=node)
+                        FeatureDeprecated.single_use(feature_name, info.deprecated, state.subproject, info.deprecated_message, location=state.current_node)
                     if info.listify:
                         kwargs[info.name] = value = mesonlib.listify(value)
                     if not check_value_type(types_tuple, value):
@@ -571,10 +799,9 @@ def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
                 if info.convertor:
                     kwargs[info.name] = info.convertor(kwargs[info.name])
 
-            return f(*wrapped_args, **wrapped_kwargs)
-        return T.cast('TV_func', wrapper)
+            return f(state, args, kwargs)
+        return wrapped
     return inner
-
 
 # This cannot be a dataclass due to https://github.com/python/mypy/issues/5374
 class FeatureCheckBase(metaclass=abc.ABCMeta):
@@ -656,22 +883,31 @@ class FeatureCheckBase(metaclass=abc.ABCMeta):
     def get_notice_str_prefix(tv: str) -> str:
         raise InterpreterException('get_notice_str_prefix not implemented')
 
-    def __call__(self, f: TV_func) -> TV_func:
-        @wraps(f)
-        def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-            node, _, _, subproject = get_callee_args(wrapped_args)
-            if subproject is None:
-                raise AssertionError(f'{wrapped_args!r}')
-            self.use(subproject, node)
-            return f(*wrapped_args, **wrapped_kwargs)
-        return T.cast('TV_func', wrapped)
+    def __call__(self, f: TV_interpreter_func) -> TV_interpreter_func:
+        @interpreter_func_decorator
+        def inner(
+            inner_f: T.Callable[[
+                TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs
+            ], TV_interpreter_func_result]
+        ) -> T.Callable[[
+            TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs
+        ], TV_interpreter_func_result]:
+            @wraps(inner_f)
+            def wrapped(
+                state: TV_interpreter_func_state, args: TV_interpreter_func_args, kwargs: TV_interpreter_func_kwargs
+            ) -> TV_interpreter_func_result:
+                if state.subproject is None:
+                    raise AssertionError(f'{state!r}')
+                self.use(state.subproject, getattr(state, 'current_node', None))
+                return inner_f(state, args, kwargs)
+            return wrapped
+        return inner(f)
 
     @classmethod
     def single_use(cls, feature_name: str, version: str, subproject: 'SubProject',
-                   extra_message: str = '', location: T.Optional['mparser.BaseNode'] = None) -> None:
+                   extra_message: T.Optional[str] = None, location: T.Optional['mparser.BaseNode'] = None) -> None:
         """Oneline version that instantiates and calls use()."""
-        cls(feature_name, version, extra_message).use(subproject, location)
-
+        cls(feature_name, version, '' if extra_message is None else extra_message).use(subproject, location)
 
 class FeatureNew(FeatureCheckBase):
     """Checks for new features"""
@@ -737,7 +973,6 @@ class FeatureDeprecated(FeatureCheckBase):
             args.append(self.extra_message)
         mlog.warning(*args, location=location)
 
-
 # This cannot be a dataclass due to https://github.com/python/mypy/issues/5374
 class FeatureCheckKwargsBase(metaclass=abc.ABCMeta):
 
@@ -753,20 +988,30 @@ class FeatureCheckKwargsBase(metaclass=abc.ABCMeta):
         self.kwargs = kwargs
         self.extra_message = extra_message
 
-    def __call__(self, f: TV_func) -> TV_func:
-        @wraps(f)
-        def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-            node, _, kwargs, subproject = get_callee_args(wrapped_args)
-            if subproject is None:
-                raise AssertionError(f'{wrapped_args!r}')
-            for arg in self.kwargs:
-                if arg not in kwargs:
-                    continue
-                name = arg + ' arg in ' + self.feature_name
-                self.feature_check_class.single_use(
-                        name, self.feature_version, subproject, self.extra_message, node)
-            return f(*wrapped_args, **wrapped_kwargs)
-        return T.cast('TV_func', wrapped)
+    def __call__(self, f: TV_interpreter_func) -> TV_interpreter_func:
+        @interpreter_func_decorator
+        def inner(
+            inner_f: T.Callable[[
+                TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs
+            ], TV_interpreter_func_result]
+        ) -> T.Callable[[
+            TV_interpreter_func_state, TV_interpreter_func_args, TV_interpreter_func_kwargs
+        ], TV_interpreter_func_result]:
+            @wraps(inner_f)
+            def wrapped(
+                state: TV_interpreter_func_state, args: TV_interpreter_func_args, kwargs: TV_interpreter_func_kwargs
+            ) -> TV_interpreter_func_result:
+                if state.subproject is None:
+                    raise AssertionError(f'{state!r}')
+                for arg in self.kwargs:
+                    if arg not in kwargs:
+                        continue
+                    name = arg + ' arg in ' + self.feature_name
+                    self.feature_check_class.single_use(
+                            name, self.feature_version, state.subproject, self.extra_message, getattr(state, 'current_node', None))
+                return inner_f(state, args, kwargs)
+            return wrapped
+        return inner(f)
 
 class FeatureNewKwargs(FeatureCheckKwargsBase):
     feature_check_class = FeatureNew

@@ -1135,6 +1135,7 @@ class CMakeTraceParser:
 
     def _cmake_target_link_libraries(self, tline: CMakeTraceLine) -> None:
         # DOC: https://cmake.org/cmake/help/latest/command/target_link_libraries.html
+        # print('_cmake_target_link_libraries', tline)
         self._parse_common_target_options('target_link_options', 'LINK_LIBRARIES', 'INTERFACE_LINK_LIBRARIES', tline)
 
     def _parse_common_target_options(self, func: str, private_prop: str, interface_prop: str, tline: CMakeTraceLine, ignore: T.Optional[T.List[str]] = None, paths: bool = False) -> None:
